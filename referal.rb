@@ -1,91 +1,87 @@
 require "logstash/filters/base"
 require "logstash/namespace"
-require "tempfile"
 
 # Parse referer strings into structured data based on snowplow data
 # 
 # Referer filter, adds information about referer source, provider, etc 
-# once the original gem gets its internal API updated more fileds & 
-# providers will be added.
-#
-# fork version used: https://github.com/tombar/referer-parser 
 #
 # Logstash releases ship with the referers.yaml database made available from
 # referer-parser with an Apache 2.0 license. For more details on referer-parser, see
 # <https://github.com/snowplow/referer-parser>.
 class LogStash::Filters::Referal < LogStash::Filters::Base
   config_name "referal"
-  plugin_status "experimental"
+  milestone 1
 
   # The field containing the referer string. If this field is an
   # array, only the first value will be used.
   config :source, :validate => :string, :required => true
 
-  # The name of the field to assign the referer data hash to
-  config :target, :validate => :string, :default => "referal"
+  # The name of the field to assign referer data into.
+  #
+  # If not specified referer data will be stored in the root of the event.
+  config :target, :validate => :string
 
   # referers.yaml file to use
   #
   # If not specified, this will default to the referers.yaml that ships
-  # with logstash.
+  # with referer-parser.
+  #
+  # You can find the latest version of this here:
+  # <https://github.com/snowplow/referer-parser/blob/master/resources/referers.yml>
   config :referers_file, :validate => :string
 
+  # custom-referers.yaml file to use for internal domains
+  #
+  # If not specified, no other referers will be merged into the parser.
+  config :custom_referers_file, :validate => :string
+
+  # A string to prepend to all of the extracted keys
+  config :prefix, :validate => :string, :default => ''
+
   public
+
   def register
     require 'referer-parser'
-    if @referers_file.nil?
-      begin
-        @parser = RefererParser::Referer.new('http://logstash.net')
-      rescue Exception => e
-        begin
-          if __FILE__ =~ /file:\/.*\.jar!/
-            # Running from a flatjar which has a different layout
-            referers_file = [__FILE__.split("!").first, "/vendor/referer-parser/data/referers.yaml"].join("!")
-            @parser = RefererParser::Referer.new('http://logstash.net', referers_file)
-          else
-            # assume operating from the git checkout
-            @parser = RefererParser::Referer.new('http://logstash.net', "vendor/referers_file/referers.yaml")
-          end
-        rescue => ex
-          raise "Failed to cache, due to: #{ex}\n#{ex.backtrace}"
-        end
-      end
+
+    if @referers.nil?
+      @logger.info("Using default referer file: #{RefererParser::Parser::DefaultFile}")
+      @parser = RefererParser::Parser.new
     else
-      @logger.info("Using referer-parser with external referers.yml", :referers_file => @referers_file)
-      @parser = RefererParser::Referer.new('http://logstash.net', @referers_file) 
+      referer_files = [@referers_file, @custom_referers_file].compact
+      @logger.info("Using custom referer file(s): #{referer_files.join(', ')}")
+      @parser = RefererParser::Parser.new(referer_files)
     end
   end #def register
 
-  public
   def filter(event)
     return unless filter?(event)
-    referal_data = nil
+    referer_data = nil
 
     referer = event[@source]
     referer = referer.first if referer.is_a? Array
 
     begin
-      referal_data = @parser.parse(referer)
+      referer_data = @parser.parse(referer)
     rescue Exception => e
       @logger.error("Uknown error while parsing referer data", :exception => e, :field => @source, :event => event)
     end
 
-    if !referal_data.nil?
-        event[@target] = {} if event[@target].nil?
+    if !referer_data.nil?
+      if @target.nil?
+        # default write to the root of the event
+        target = event
+      else
+        target = event[@target] ||= {}
+      end
 
-        event[@target]["known"] = referal_data.known?
-        event[@target]["name"] = referal_data.referer if not referal_data.referer.nil?
-        event[@target]["host"] = referal_data.uri.host if not referal_data.uri.host.nil?
-
-        # TODO: once the gem internal api is updated, more fields will be available
-        if referal_data.known? and not referal_data.search_term.nil?
-          event[@target]["search_term"] = referal_data.search_term
-        end
+      # To match historical naming conventions
+      target[@prefix + "known"] = referer_data[:known]
+      target[@prefix + "name"] = referer_data[:source] if referer_data.has_key?(:source)
+      target[@prefix + "medium"] = referer_data[:medium] if referer_data.has_key?(:medium)
+      target[@prefix + "search_term"] = referer_data[:term] if referer_data.has_key?(:term)
+      target[@prefix + "host"] = referer_data[:domain] if referer_data.has_key?(:domain)
 
       filter_matched(event)
     end
-
   end # def filter
 end # class LogStash::Filters::Referal
-
-
