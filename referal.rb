@@ -61,7 +61,7 @@ class LogStash::Filters::Referal < LogStash::Filters::Base
     referer = referer.first if referer.is_a? Array
 
     begin
-      referer_data = @parser.parse(referer)
+      referer_data = @parser.parse(referer) unless referer.nil? or referer.strip == ''
     rescue Exception => e
       @logger.error("Uknown error while parsing referer data", :exception => e, :field => @source, :event => event)
     end
